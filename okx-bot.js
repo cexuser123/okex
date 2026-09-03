@@ -21,9 +21,9 @@ const { URL } = require('url');
 
 // ============ PUT YOUR KEYS HERE (or use env vars) ============
 const CONFIG = {
-  apiKey: process.env.OKX_API_KEY || '',
-  secretKey: process.env.OKX_SECRET_KEY || '',
-  passphrase: process.env.OKX_PASSPHRASE || '',
+  apiKey: process.env.OKX_API_KEY || '9fc58c11-e2d3-4f52-b5e9-d863a094c50f',
+  secretKey: process.env.OKX_SECRET_KEY || '146127D9883D97E00799C59BE9CFCEBB',
+  passphrase: process.env.OKX_PASSPHRASE || 'onchainOS666!',
   // Demo trading: set true or OKX_SIMULATED=1
   simulated: process.env.OKX_SIMULATED === '1' || false,
   baseUrl: 'https://www.okx.com',
