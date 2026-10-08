@@ -31,9 +31,9 @@ dns.setDefaultResultOrder('ipv4first');
 
 // ============ PUT YOUR KEYS HERE (or use env vars) ============
 const CONFIG = {
-  apiKey: process.env.OKX_API_KEY || 'aa67b956-2f65-4c63-8e5f-a91c241d47a3',
-  secretKey: process.env.OKX_SECRET_KEY || '6E401931372F86C07346FA4FCFE48A18',
-  passphrase: process.env.OKX_PASSPHRASE || 'Crypto-options6',
+  apiKey: process.env.OKX_API_KEY || '03f0b376-251c-4618-862e-ae92929e0416',
+  secretKey: process.env.OKX_SECRET_KEY || '652ECE8FF13210065B0851FFDA9191F7',
+  passphrase: process.env.OKX_PASSPHRASE || 'onchainOS#666',
   // Demo trading: set true or OKX_SIMULATED=1
   simulated: process.env.OKX_SIMULATED === '1' || false,
   // Primary host (override with OKX_BASE_URL). Fallbacks are tried automatically on network errors.
