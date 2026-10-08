@@ -3,9 +3,14 @@
  *
  * Usage:
  *   node okx-bot.js balance
+ *   node okx-bot.js balance BTC
  *   node okx-bot.js address USDT
- *   node okx-bot.js address BTC --chain ERC20
+ *   node okx-bot.js perms
  *   node okx-bot.js all USDT
+ *
+ * balance also prints:
+ *   - deposit addresses for held coins
+ *   - API key permission probe (Read / Trade / Withdraw)
  *
  * Credentials (pick one):
  *   1) Set below in CONFIG
@@ -220,6 +225,182 @@ async function getDepositAddress(ccy, chain) {
   return res;
 }
 
+async function getAccountConfig() {
+  return request('GET', '/api/v5/account/config');
+}
+
+function collectHeldCcys(tradingRes, fundingRes, onlyCcy) {
+  if (onlyCcy) return [onlyCcy.toUpperCase()];
+  const set = new Set();
+  for (const acct of tradingRes.data || []) {
+    for (const d of acct.details || []) {
+      if (Number(d.eq) > 0 || Number(d.cashBal) > 0 || Number(d.availBal) > 0) set.add(d.ccy);
+    }
+  }
+  for (const d of fundingRes.data || []) {
+    if (Number(d.bal) > 0 || Number(d.availBal) > 0) set.add(d.ccy);
+  }
+  // Prefer major coins first
+  const priority = ['BTC', 'ETH', 'USDT', 'USDC', 'OKB', 'SOL'];
+  return [...set].sort((a, b) => {
+    const ia = priority.indexOf(a);
+    const ib = priority.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+function pickMainDepositRows(rows) {
+  const list = rows || [];
+  if (!list.length) return [];
+  // Prefer common deposit networks, then selected flag
+  const prefer = [
+    '-Bitcoin',
+    'BTC-Bitcoin',
+    'ETH-ERC20',
+    '-ERC20',
+    'USDT-TRC20',
+    '-TRC20',
+    '-Solana',
+    '-BSC',
+  ];
+  const score = (r) => {
+    const chain = String(r.chain || '');
+    let s = prefer.findIndex((p) => chain.includes(p) || chain === p);
+    if (s === -1) s = 50;
+    if (r.selected === true || String(r.selected) === 'true') s -= 0.5;
+    return s;
+  };
+  const best = [...list].sort((a, b) => score(a) - score(b))[0];
+  return best ? [best] : [];
+}
+
+async function printDepositAddressesForCcys(ccys, { allChains = false } = {}) {
+  console.log('\n=== OKX Deposit Addresses (for held coins) ===');
+  if (!ccys.length) {
+    console.log('(no held coins)');
+    return;
+  }
+  for (const ccy of ccys) {
+    try {
+      const res = await getDepositAddress(ccy);
+      const rows = allChains ? res.data || [] : pickMainDepositRows(res.data || []);
+      if (!rows.length) {
+        console.log(`${pad(ccy, 8)} (no deposit address returned)`);
+        continue;
+      }
+      for (const row of rows) {
+        const tag = row.tag ? `  tag=${row.tag}` : '';
+        console.log(`${pad(ccy, 8)} ${pad(row.chain || '', 22)} ${row.addr}${tag}`);
+      }
+    } catch (err) {
+      console.log(`${pad(ccy, 8)} error: ${err.message}`);
+    }
+  }
+  console.log('(use: node okx-bot.js address BTC   to see all chains for one coin)');
+}
+
+function permissionDenied(err) {
+  const code = String((err && err.okxCode) || '');
+  const msg = String((err && err.message) || '').toLowerCase();
+  return (
+    code === '50113' ||
+    code === '50114' ||
+    code === '50119' ||
+    /permission|not allow|no authority|unauthorized|api key/i.test(msg)
+  );
+}
+
+async function probeApiKeyPermissions() {
+  const result = {
+    Read: { ok: false, detail: '' },
+    Trade: { ok: false, detail: '' },
+    Withdraw: { ok: false, detail: '' },
+    account: null,
+  };
+
+  // Read
+  try {
+    await request('GET', '/api/v5/account/balance');
+    result.Read = { ok: true, detail: 'account/balance OK' };
+  } catch (err) {
+    result.Read = { ok: false, detail: err.message };
+  }
+
+  // Account config (extra info; still Read)
+  try {
+    const cfg = await getAccountConfig();
+    result.account = (cfg.data && cfg.data[0]) || null;
+  } catch {
+    /* ignore */
+  }
+
+  // Trade: invalid order should fail on params if Trade allowed, or permission if not
+  try {
+    await request('POST', '/api/v5/trade/order', {
+      instId: 'BTC-USDT',
+      tdMode: 'cash',
+      side: 'buy',
+      ordType: 'limit',
+      sz: '0',
+      px: '1',
+    });
+    result.Trade = { ok: true, detail: 'trade endpoint accepted (unexpected)' };
+  } catch (err) {
+    if (permissionDenied(err)) {
+      result.Trade = { ok: false, detail: err.message };
+    } else {
+      // Parameter / business error means the key can hit trade APIs
+      result.Trade = { ok: true, detail: `trade API reachable (${err.okxCode || 'biz error'})` };
+    }
+  }
+
+  // Withdraw: invalid withdraw should fail on params if Withdraw allowed
+  try {
+    await request('POST', '/api/v5/asset/withdrawal', {
+      ccy: 'BTC',
+      amt: '0',
+      dest: '4',
+      toAddr: 'invalid',
+      chain: 'BTC-Bitcoin',
+    });
+    result.Withdraw = { ok: true, detail: 'withdraw endpoint accepted (unexpected)' };
+  } catch (err) {
+    if (permissionDenied(err)) {
+      result.Withdraw = { ok: false, detail: err.message };
+    } else {
+      result.Withdraw = { ok: true, detail: `withdraw API reachable (${err.okxCode || 'biz error'})` };
+    }
+  }
+
+  return result;
+}
+
+function printPermissions(probe) {
+  console.log('\n=== API Key Permissions (probed) ===');
+  console.log(`Key     : ${CONFIG.apiKey}`);
+  console.log(`Read    : ${probe.Read.ok ? 'YES' : 'NO'}  ${probe.Read.detail}`);
+  console.log(`Trade   : ${probe.Trade.ok ? 'YES' : 'NO'}  ${probe.Trade.detail}`);
+  console.log(`Withdraw: ${probe.Withdraw.ok ? 'YES' : 'NO'}  ${probe.Withdraw.detail}`);
+  if (probe.account) {
+    const a = probe.account;
+    console.log('-'.repeat(60));
+    if (a.uid) console.log(`UID     : ${a.uid}`);
+    if (a.acctLv !== undefined) console.log(`AcctLv  : ${a.acctLv}`);
+    if (a.posMode) console.log(`PosMode : ${a.posMode}`);
+    if (a.level) console.log(`Level   : ${a.level}`);
+    if (a.label) console.log(`Label   : ${a.label}`);
+    if (a.roleType !== undefined) console.log(`Role    : ${a.roleType}`);
+    if (a.ip) console.log(`IP bind : ${a.ip}`);
+  }
+  console.log(
+    '\nNote: OKX does not return a permission list API; this probes endpoints.\n' +
+      'Exact IP whitelist / key label are also visible in OKX website: Profile → API.'
+  );
+}
+
 function printTradingBalance(res) {
   console.log('\n=== Trading Account Balance ===');
   if (!res.data || !res.data.length) {
@@ -299,16 +480,16 @@ function usage() {
 OKX Balance & Address Bot
 
 Commands:
-  balance [CCY]              Show trading + funding balances (optional currency filter)
-  address <CCY> [--chain X]  Show deposit address(es) for a currency
-  all <CCY> [--chain X]      Show balances + deposit address for a currency
+  balance [CCY]              Balances + deposit addresses + API key permissions
+  address <CCY> [--chain X]  Show deposit address(es) for a currency (all chains)
+  perms                      Probe API key permissions only
+  all <CCY> [--chain X]      Balances + deposit address for one currency
 
 Examples:
   node okx-bot.js balance
-  node okx-bot.js balance USDT
-  node okx-bot.js address USDT
-  node okx-bot.js address USDT --chain ERC20
-  node okx-bot.js all BTC --chain Bitcoin
+  node okx-bot.js balance BTC
+  node okx-bot.js address BTC
+  node okx-bot.js perms
 
 Env / config:
   OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE
@@ -347,17 +528,30 @@ async function main() {
     console.log('[mode] simulated / demo trading');
   }
 
+  if (cmd === 'perms') {
+    const probe = await probeApiKeyPermissions();
+    printPermissions(probe);
+    return;
+  }
+
   if (cmd === 'balance') {
-    const [trading, funding] = await Promise.all([
+    const [trading, funding, probe] = await Promise.all([
       getTradingBalance(ccy),
       getFundingBalance(ccy),
+      probeApiKeyPermissions(),
     ]);
     printTradingBalance(trading);
     printFundingBalance(funding);
+    const held = collectHeldCcys(trading, funding, ccy);
+    // For full balance, show main deposit addr for major/held coins (cap to avoid rate limits)
+    const addrCcys = ccy ? held : held.slice(0, 12);
+    await printDepositAddressesForCcys(addrCcys, { allChains: Boolean(ccy) });
+    printPermissions(probe);
     return;
   }
 
   if (cmd === 'address') {
+    if (!ccy) throw new Error('Usage: address <CCY> [--chain X]');
     const res = await getDepositAddress(ccy, flags.chain);
     printAddresses(res, ccy);
     return;
@@ -365,14 +559,16 @@ async function main() {
 
   if (cmd === 'all') {
     if (!ccy) throw new Error('all requires a currency, e.g. all USDT');
-    const [trading, funding, addr] = await Promise.all([
+    const [trading, funding, addr, probe] = await Promise.all([
       getTradingBalance(ccy),
       getFundingBalance(ccy),
       getDepositAddress(ccy, flags.chain),
+      probeApiKeyPermissions(),
     ]);
     printTradingBalance(trading);
     printFundingBalance(funding);
     printAddresses(addr, ccy);
+    printPermissions(probe);
     return;
   }
 
